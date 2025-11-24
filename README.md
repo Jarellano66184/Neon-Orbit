@@ -78,6 +78,7 @@
         .hud-top {
             display: flex;
             justify-content: space-between;
+            align-items: flex-start;
             width: 100%;
             max-width: 500px;
             margin: 0 auto;
@@ -94,6 +95,36 @@
             font-size: 32px; font-weight: 700; color: #fff;
             text-shadow: 0 0 15px rgba(255, 255, 255, 0.5);
         }
+
+        /* Bottom Buttons */
+        .hud-btn {
+            pointer-events: auto;
+            position: absolute;
+            bottom: 30px;
+            z-index: 15;
+            background: rgba(0, 0, 0, 0.5);
+            border: 2px solid rgba(255,255,255,0.2);
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 24px;
+            cursor: pointer;
+            color: rgba(255, 255, 255, 0.8);
+            transition: all 0.2s;
+            backdrop-filter: blur(4px);
+        }
+        .hud-btn:hover {
+            border-color: #00d2ff;
+            color: #fff;
+            box-shadow: 0 0 15px rgba(0, 210, 255, 0.3);
+            transform: scale(1.05);
+        }
+
+        #mute-btn { right: 30px; }
+        #pause-btn { left: 30px; }
 
         .next-box { text-align: right; display: flex; flex-direction: column; align-items: flex-end; }
         .next-label {
@@ -182,11 +213,17 @@
         <div id="timer-container">
             <div id="timer-bar"></div>
         </div>
+        
+        <!-- Bottom Buttons -->
+        <button id="pause-btn" class="hud-btn">⏸️</button>
+        <button id="mute-btn" class="hud-btn">🔊</button>
+
         <div class="hud-top">
             <div class="score-box">
                 <div class="score-label">Score</div>
                 <div id="score">0</div>
             </div>
+            
             <div class="next-box">
                 <div class="next-label">Next</div>
                 <div id="next-ball-display"></div>
@@ -194,12 +231,18 @@
         </div>
     </div>
 
-    <!-- Overlay Layer (Start / Game Over) -->
+    <!-- Overlay Layer (Start / Game Over / Pause) -->
     <div id="overlay-layer">
         <div id="start-screen" class="menu-content">
             <h1>Neon Orbit</h1>
             <p>Drag to Aim. Release to Drop.<br><strong>New Rule:</strong> 5 Seconds per drop!</p>
             <button class="btn" id="start-btn">Loading...</button>
+        </div>
+
+        <div id="pause-screen" class="menu-content hidden">
+            <h1>PAUSED</h1>
+            <p>Game Paused</p>
+            <button class="btn" id="resume-btn">RESUME</button>
         </div>
 
         <div id="game-over-screen" class="menu-content hidden">
@@ -222,6 +265,9 @@
             btn.addEventListener('click', startGame);
             
             document.getElementById('restart-btn').addEventListener('click', resetGame);
+            document.getElementById('mute-btn').addEventListener('click', toggleMute);
+            document.getElementById('pause-btn').addEventListener('click', togglePause);
+            document.getElementById('resume-btn').addEventListener('click', togglePause);
         });
 
         // --- Configuration ---
@@ -240,7 +286,9 @@
         let engine, world, runner;
         let canvas, ctx, width, height;
         let isGameActive = false;
+        let isPaused = false;
         let canDrop = true;
+        let isDragActive = false; // Ensures we only drop if we started a valid drag
         let currentScore = 0;
         
         let currentBallIndex = 0;
@@ -254,6 +302,7 @@
         let mouseX = 0;
         let particles = [];
         let audioCtx;
+        let isMuted = false;
 
         // --- Audio ---
         function initAudio() {
@@ -261,8 +310,46 @@
             if (audioCtx.state === 'suspended') audioCtx.resume();
         }
 
+        function toggleMute() {
+            isMuted = !isMuted;
+            const btn = document.getElementById('mute-btn');
+            btn.innerText = isMuted ? '🔇' : '🔊';
+        }
+
+        function togglePause(e) {
+            // Prevent this click from propagating to game
+            if(e && e.stopPropagation) e.stopPropagation();
+
+            if (!isGameActive) return;
+
+            isPaused = !isPaused;
+            const pauseScreen = document.getElementById('pause-screen');
+            const overlay = document.getElementById('overlay-layer');
+            const pauseBtn = document.getElementById('pause-btn');
+
+            if (isPaused) {
+                // Pause Logic
+                Matter.Runner.stop(runner);
+                pauseScreen.classList.remove('hidden');
+                overlay.classList.remove('hidden');
+                pauseBtn.innerText = "▶️";
+                isDragActive = false; // Cancel any active drag
+            } else {
+                // Resume Logic
+                Matter.Runner.run(runner, engine);
+                pauseScreen.classList.add('hidden');
+                overlay.classList.add('hidden');
+                pauseBtn.innerText = "⏸️";
+                
+                // Reset timer delta to prevent jump
+                lastTime = performance.now();
+                requestAnimationFrame(gameLoop);
+            }
+        }
+
         function playSound(type, pitch = 600) {
-            if (!audioCtx) return;
+            if (isMuted || !audioCtx) return; 
+
             const osc = audioCtx.createOscillator();
             const gain = audioCtx.createGain();
             osc.connect(gain);
@@ -296,6 +383,7 @@
             
             initPhysics();
             isGameActive = true;
+            isPaused = false;
             
             // Initial State
             currentBallIndex = Math.floor(Math.random() * 3);
@@ -392,7 +480,7 @@
         }
 
         function dropBall() {
-            if (!canDrop || !isGameActive) return;
+            if (!canDrop || !isGameActive || isPaused) return;
             
             const r = BALL_TYPES[currentBallIndex].radius;
             let dropX = mouseX;
@@ -427,30 +515,48 @@
 
         // --- Input ---
         function handleInput(e) {
-            if (!isGameActive) return;
-
-            let cx;
-            if (e.touches) {
-                cx = e.touches[0].clientX;
-            } else {
-                cx = e.clientX;
+            if (!isGameActive || isPaused) {
+                isDragActive = false;
+                return;
             }
 
-            const rect = canvas.getBoundingClientRect();
-            mouseX = cx - rect.left;
+            // Update mouse/touch position if valid
+            if (e.type === 'mousemove' || e.type === 'mousedown' || e.type === 'touchmove' || e.type === 'touchstart') {
+                let cx;
+                if (e.touches && e.touches.length > 0) {
+                    cx = e.touches[0].clientX;
+                } else if (e.clientX !== undefined) {
+                    cx = e.clientX;
+                }
+                
+                if (cx !== undefined) {
+                    const rect = canvas.getBoundingClientRect();
+                    mouseX = cx - rect.left;
+                }
+            }
 
-            if (e.type === 'touchend' || e.type === 'mouseup') {
-                dropBall();
+            // State Logic: Only allow drop if we started the drag inside the game state
+            if (e.type === 'mousedown' || e.type === 'touchstart') {
+                isDragActive = true;
+            } else if (e.type === 'mouseup' || e.type === 'touchend') {
+                if (isDragActive) {
+                    dropBall();
+                }
+                isDragActive = false; // Always reset
             }
         }
 
         // --- Game Loop (Rendering & Time) ---
         function gameLoop(timestamp) {
             if (!isGameActive) return;
+            if (isPaused) return; // Stop rendering loop if paused
 
             // Timer Logic
-            const dt = timestamp - lastTime;
+            let dt = timestamp - lastTime;
             lastTime = timestamp;
+
+            // Sanity check: If dt is crazy huge (lag or resume glich), pretend it's normal frame
+            if (dt > 1000) dt = 16; 
 
             if (canDrop) {
                 timeRemaining -= dt;
@@ -582,6 +688,8 @@
         }
 
         function checkGameOver() {
+            if (isPaused || !isGameActive) return;
+
             const bodies = Matter.Composite.allBodies(world);
             const dangerLimit = height * 0.2; 
             
@@ -615,6 +723,7 @@
 
             currentScore = 0;
             isGameActive = true;
+            isPaused = false;
             canDrop = true;
             currentBallIndex = Math.floor(Math.random() * 3);
             upcomingBallIndex = Math.floor(Math.random() * 3);
@@ -625,6 +734,7 @@
             
             document.getElementById('overlay-layer').classList.add('hidden');
             document.getElementById('game-over-screen').classList.add('hidden');
+            document.getElementById('pause-screen').classList.add('hidden');
             
             Matter.Runner.run(runner, engine);
             requestAnimationFrame(gameLoop);
